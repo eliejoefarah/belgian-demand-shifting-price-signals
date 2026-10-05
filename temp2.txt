@@ -1,0 +1,152 @@
+## Literature Review Clusters — Final Reference Sheet
+
+---
+
+### Reading Order & Clusters
+
+---
+
+**Cluster 6 — Emission Factor Methodology + Gas Peaker Displacement**
+🟡 Lighter (3–4 papers)
+
+Keywords:
+* "marginal emission factor" AND electricity
+* "average vs marginal emissions" AND "demand response"
+* "marginal generator" AND "demand response"
+* "gas peaker plant displacement" AND "demand response"
+* "direct vs lifecycle emission factor" AND electricity grid
+
+Gap to look for: papers evaluating demand response against average grid intensity rather than marginal or gas-specific intensity — if they don't distinguish which generator is avoided, note it. Also check whether gas displacement is measured directly or inferred.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+**Cluster 1 — Load Shifting to Match Renewable Generation / Residual Load Shaping**
+🔴 Core (5–7 papers)
+
+Keywords:
+* "load shifting to match renewable generation"
+* "residual load" AND "demand response"
+* "net load shaping" AND flexibility
+* "renewable-following demand response"
+* "duck curve" AND "demand response"
+* "renewable curtailment" AND "demand-side flexibility"
+
+Gap to look for: papers that optimise for cost or peak reduction but don't measure whether the shifted load actually avoids gas or lands on renewables. Also check whether the evaluation uses real generation mix data or a stylised model.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+**Cluster 2 — Price-Based Demand Response and Dynamic Pricing Design**
+🔴 Core (5–7 papers)
+
+Keywords:
+* "price-based demand response"
+* "dynamic pricing design" AND residential
+* "indirect load control"
+* "time-of-use tariff" AND ("design" OR "demand-side flexibility")
+* "real-time pricing" AND "demand-side flexibility"
+* "carbon price signal" AND "residential demand response"
+
+Gap to look for: papers that design price signals purely for cost minimisation with no carbon or gas-share component. Note whether the signal is evaluated for its environmental effect at all, and whether it accounts for forecast uncertainty in the price or the generation mix.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+**Cluster 5b — Robust / Stochastic Signal Design Under Forecast Uncertainty**
+🔴 Core (5–7 papers)
+
+Keywords:
+* "robust demand response" AND "forecast uncertainty"
+* "stochastic price signal" AND "demand response"
+* "chance-constrained demand response"
+* "scenario-based demand response" AND uncertainty
+* "robust optimisation" AND "price-based demand response"
+
+Gap to look for: papers that handle uncertainty in load or price forecasts but not in the renewable generation signal itself — i.e. the signal is treated as known even though wind/solar forecasts carry significant day-ahead error. Also check whether robustness is evaluated against cost only or also against emissions outcomes.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+**Cluster 3 — Synchronisation / Rebound Effects**
+🟡 Lighter (3–4 papers)
+
+Keywords:
+* "demand response rebound peak"
+* "coincident load peak" AND "time-of-use"
+* "diversity factor" AND "demand response"
+* "signal diversification" OR "randomized dispatch" AND "demand response"
+* "closed-loop" AND "demand response"
+* "open-loop demand response" AND emissions
+
+Gap to look for: papers that evaluate rebound only against peak magnitude or grid stability, not against emissions or gas use. If a paper finds that synchronisation creates a new peak but doesn't ask whether that peak is served by gas, that is your gap — note it explicitly.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+**Cluster 4 — Asset-Specific Flexibility: Heat Pumps, DHW, EV Charging**
+🟡 Lighter (3–4 papers)
+
+Keywords:
+* "heat pump demand response" OR "heat pump thermal flexibility"
+* "domestic hot water thermal storage flexibility"
+* "EV smart charging" AND "renewable integration"
+* "thermal mass flexibility" AND "price signal"
+* "electric vehicle charging" AND "carbon-aware"
+
+Gap to look for: papers that characterise asset flexibility well but optimise only for self-consumption or cost, not for grid-level carbon impact. Also check whether flexibility potential is assessed under real forecast conditions or perfect foresight — most asset-level studies assume the latter.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+**Cluster 5a — Forecast Error Propagation into DR Signal Quality**
+🟡 Lighter (3–4 papers)
+
+Keywords:
+* "day-ahead forecast error" AND "renewable generation"
+* "wind forecast uncertainty" AND "demand response"
+* "solar forecast error" AND "load scheduling"
+* "forecast bias" AND "price signal" AND residential
+
+Gap to look for: papers that quantify forecast error but don't propagate it through to the demand response outcome — i.e. they stop at signal quality and don't measure how much the load shift degrades when the forecast is wrong. That propagation is what your uncertainty chapter addresses.
+
+---
+
+---
+
+## Table of Contents
+
+---
+
+**1. Introduction**
+- 1.1 Context
+- 1.2 Research question
+- 1.3 Thesis outline
+
+**2. Background**
+- 2.1 Julian's simulation framework (TreeC, RBC, 500-house fleet)
+- 2.2 Belgian electricity market and day-ahead pricing
+- 2.3 CO₂ accounting methodology (emission factor choice, direct vs lifecycle, average vs marginal)
+
+**3. Literature Review**
+- 3.1 Emission factor methodology and gas peaker displacement
+- 3.2 Load shifting to match renewable generation
+- 3.3 Price-based demand response and dynamic pricing design
+- 3.4 Synchronisation and rebound effects
+- 3.5 Asset-specific flexibility (heat pumps, DHW, EV charging)
+- 3.6 Robust signal design under forecast uncertainty
+- 3.7 Forecast error propagation into signal quality
+- 3.8 Research gap
+
+**4. Methodology**
+- 4.1 Carbon-intensity signal construction
+- 4.2 Price signal design
+- 4.3 Handling forecast uncertainty
+- 4.4 Experiment design (rungs)
+
+**5. Results**
+- 5.1 Baseline reproduction
+- 5.2 Carbon-aware signal performance
+- 5.3 Rebound analysis
+- 5.4 Sensitivity to forecast quality
+
+**6. Discussion**
+
+**7. Conclusion**
+
+**References**
