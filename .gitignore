@@ -30,3 +30,8 @@ venv/
 .coverage
 .vscode/
 .idea/
+
+# Outputs
+
+out/
+fleet_harness/out/
