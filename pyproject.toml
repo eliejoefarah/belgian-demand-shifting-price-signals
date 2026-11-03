@@ -10,3 +10,10 @@ dependencies = ["pandas"]
 
 [tool.setuptools.packages.find]
 include = ["fleet_harness*", "price_signals*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: runs MPC simulations (needs paper data, EnergyPlus, Gurobi); run with -m slow",
+]

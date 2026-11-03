@@ -1,0 +1,357 @@
+"""Run one house with Julian's MPC, optionally planning on a separate control signal.
+
+The MPC reads the price in exactly one place, `MPCManager.set_cost_constr`
+(mpc_ems.py:501). The scorer `DayAheadEngie.calculate_kpi` (custom_classes.py:56)
+reads the same `day_ahead_price` env value. To let the MPC plan on a signal while
+opex is still billed at the real price, the signal is stored as a separate env value,
+`control_signal`, and swapped in only while `set_cost_constr` builds the objective.
+"""
+
+import contextlib
+import copy
+import datetime
+import json
+import os
+import pickle
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from simugrid.simulation.config_parser import parse_config_file
+from simugrid.simulation.environment import BaseListValue
+from simugrid.assets.energyplus import EnergyPlus
+from belgian_dwellings.simulation.calibrate_mpc import get_energyplus_calibration
+from belgian_dwellings.simulation.custom_classes import DayAheadEngie
+from belgian_dwellings.simulation.mpc_ems import MPCRealistic, PerfectMPC
+from belgian_dwellings.utils.progress import simulation_bar
+
+from fleet_harness.runner import PAPER_ROOT, get_price_series
+
+CAL_DIR = Path(__file__).resolve().parent.parent / "results" / "calibration"
+
+
+def shifted_2023_config(config_path):
+    """Write the 2023 version of a house config, atomically; return its path.
+
+    Same output as the paper's tmp_2023_config (same path, same content, checked by a test),
+    but that function truncates and rewrites the file on every call, so a parallel worker can
+    read it empty (JSONDecodeError). Here the file is written to a unique temp name and moved
+    into place with os.replace, so readers always see a complete file.
+    """
+    config_path = str(config_path)
+    tmp_dir = os.path.dirname(config_path) + "_tmp_2023"
+    os.makedirs(tmp_dir, exist_ok=True)
+    with open(config_path) as f:
+        config = json.load(f)
+    config["Microgrid"]["start_time"] = config["Microgrid"]["start_time"].replace("2022", "2023")
+    config["Microgrid"]["end_time"] = config["Microgrid"]["end_time"].replace("2023", "2024")
+    for asset in config["Assets"].values():
+        if asset["name"].startswith("EnergyPlus_"):
+            asset["epw_weather"] = asset["epw_weather"].replace("2022", "2023")
+
+    target = os.path.join(tmp_dir, os.path.basename(config_path))
+    fd, partial = tempfile.mkstemp(dir=tmp_dir, prefix=".partial_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=4)
+        os.replace(partial, target)
+    except BaseException:
+        if os.path.exists(partial):
+            os.remove(partial)
+        raise
+    return target
+
+
+def house_config_paths(house_num, tot_houses=500):
+    """Return (original 2022 config, year-shifted 2023 config) as absolute paths."""
+    original = str(PAPER_ROOT / "data" / f"houses_belgium_{tot_houses}" / f"house_{house_num}.json")
+    return original, shifted_2023_config(original)
+
+
+@contextlib.contextmanager
+def parsed_house(house_num, tot_houses=500):
+    """Parse a house's 2023 config inside a temp dir, without simulating it.
+
+    parse_config_file already starts EnergyPlus (which writes to ./out), so this runs in a
+    temp working directory and stops the EnergyPlus threads on exit. Process-wide chdir:
+    don't use from threads.
+    """
+    previous_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix=f"parse_house{house_num}_") as d:
+        os.chdir(d)
+        microgrid = None
+        try:
+            microgrid = parse_config_file(house_config_paths(house_num, tot_houses)[1])
+            yield microgrid
+        finally:
+            if microgrid is not None:
+                for asset in microgrid.assets:
+                    if isinstance(asset, EnergyPlus):
+                        asset.stop_energyplus_thread()
+            os.chdir(previous_cwd)
+
+
+def load_house_price_and_tariffs(house_num, tot_houses=500):
+    """Return (real day-ahead price Series, {offtake_extra, injection_extra}) for a house.
+
+    The price index is timezone-naive UTC (the house configs use timezone UTC). The two
+    extras are read at the first step; they are constant in the house configs.
+    """
+    with parsed_house(house_num, tot_houses) as microgrid:
+        env_values = microgrid.environments[0].env_values
+        price = get_price_series(microgrid)
+        extras = {k: float(env_values[k].value) for k in ("offtake_extra", "injection_extra")}
+    return price, extras
+
+
+def real_price_day_ahead_cost(grid_kw, time_step_h, price, offtake_extra, injection_extra):
+    """Recompute DayAheadEngie's `day_ahead` KPI from grid power and a price series.
+
+    Same formula as custom_classes.DayAheadEngie.calculate_kpi:
+      offtake   (E > 0): E * (price + offtake_extra), times 1.06 VAT when that price > 0
+      injection (E <= 0): E * (price + injection_extra)
+    and the KPI is minus the sum (negative = cost).
+
+    grid_kw: PublicGrid_0 power in kW (positive = offtake), tz-aware UTC index, as in
+        extract_results()["power"]. price: Series; a naive index is taken as UTC.
+    Used to bill a run at the real price, independent of the signal the MPC planned on.
+    """
+    if price.index.tz is None:
+        price = price.tz_localize("UTC")
+    p = price.reindex(grid_kw.index, method="ffill")
+    if p.isna().any():
+        raise ValueError("price does not cover every grid timestamp")
+    p = p.to_numpy()
+    energy = grid_kw.to_numpy() * time_step_h
+    offtake_price = p + offtake_extra
+    offtake = energy * offtake_price * np.where(offtake_price > 0, 1.06, 1.0)
+    injection = energy * (p + injection_extra)
+    return -float(np.where(energy > 0, offtake, injection).sum())
+
+
+def get_calibration(house_num, mode, tot_houses=500):
+    """Return (thermal calibration list, EV session history), cached on disk.
+
+    Calibration is price-independent, so it is computed once per house and mode.
+    Realistic calibrates on the original 2022 config, perfect on the 2023 config,
+    the same rule as get_results.mpc_execution.
+
+    A deep copy is returned every time: EasyForcaster appends new EV sessions to the
+    history in place (forecaster.py:274-279), so reusing one object across runs would
+    leak one run's sessions into the next run's EV predictor.
+    """
+    path = CAL_DIR / f"house_{house_num}_{tot_houses}_{mode}.pkl"
+    if path.exists():
+        cal = pickle.loads(path.read_bytes())
+    else:
+        original, cfg_2023 = house_config_paths(house_num, tot_houses)
+        source = original if mode == "realistic" else cfg_2023
+        cal = get_energyplus_calibration(source)
+        CAL_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(pickle.dumps(cal))
+    return copy.deepcopy(cal)
+
+
+def add_control_signal(microgrid, signal_series=None):
+    """Add env value `control_signal`; defaults to a copy of the real day-ahead price.
+
+    Always builds a new BaseListValue, even for the default: Environment.update() calls
+    sample_next() once per dict entry, so one object under two keys would advance twice
+    per step.
+    """
+    env_values = microgrid.environments[0].env_values
+    baseline = get_price_series(microgrid)
+    if signal_series is None:
+        signal_series = baseline
+    elif not signal_series.index.equals(baseline.index):
+        raise ValueError("control_signal must have the same timestamps as day_ahead_price")
+
+    value = BaseListValue.construct_from_two_lists(
+        microgrid,
+        list(signal_series.index.to_pydatetime()),
+        signal_series.to_list(),
+    )
+    value.sample_date()
+    env_values["control_signal"] = value
+
+
+class ControlSignalMixin:
+    """Make set_cost_constr read `control_signal` instead of `day_ahead_price`.
+
+    set_cost_constr only calls .get_forecast() on the price, which does not advance the
+    value, so swapping the key for the duration of the call is safe. The real price is
+    restored before DayAheadEngie reads it later in the same step.
+    """
+
+    def set_cost_constr(self):
+        env_values = self.microgrid.environments[0].env_values
+        real_price = env_values["day_ahead_price"]
+        env_values["day_ahead_price"] = env_values["control_signal"]
+        try:
+            super().set_cost_constr()
+        finally:
+            env_values["day_ahead_price"] = real_price
+
+
+class SignalMPCRealistic(ControlSignalMixin, MPCRealistic):
+    pass
+
+
+class SignalPerfectMPC(ControlSignalMixin, PerfectMPC):
+    pass
+
+
+def record_solves(microgrid, ems):
+    """Log the Gurobi outcome of every MPC step to `microgrid.solve_log` (observation only).
+
+    Wraps the instance's update_control_points (called once per step by
+    HouseManager.simulate_step). After it returns, the model holds the last solve of the
+    step: its status (2 = optimal, 9 = time limit, 17 = memory limit, anything else =
+    retries exhausted) and its runtime. Runtimes of earlier retries in the same step are
+    not counted.
+    """
+    microgrid.solve_log = []
+    original = ems.update_control_points
+
+    def wrapped():
+        start = microgrid.utc_datetime
+        result = original()
+        microgrid.solve_log.append((start, ems.model.Status, ems.model.Runtime))
+        return result
+
+    ems.update_control_points = wrapped
+
+
+def run_one_house_mpc(
+    house_num,
+    mode="realistic",
+    signal_series=None,
+    disable_enforced=False,
+    days=None,
+    use_signal=True,
+    tot_houses=500,
+    gurobi_threads=1,
+):
+    """Run one house-year (or the first `days` days) with the MPC on the 2023 config.
+
+    use_signal=False runs Julian's unmodified MPC classes with the same calibration and
+    window, as the baseline for the equivalence check.
+    gurobi_threads overrides Julian's Threads = 4 per solve (None keeps his 4). Default 1,
+    decided 3 Nov (experiments/thread_check.py): all solves optimal, opex within 0.003 %,
+    ~40 % more fleet throughput. The thread count changes how Gurobi breaks ties, so every
+    run that is compared (baselines included) must use the same value.
+    """
+    _, cfg_2023 = house_config_paths(house_num, tot_houses)
+    thermal_cal, ev_hist = get_calibration(house_num, mode, tot_houses)
+
+    microgrid = parse_config_file(cfg_2023)
+    microgrid.config_file = Path(cfg_2023).name
+    if use_signal:
+        add_control_signal(microgrid, signal_series)
+    microgrid.set_reward(DayAheadEngie())
+
+    if mode == "perfect":
+        cls = SignalPerfectMPC if use_signal else PerfectMPC
+        ems = cls(microgrid, thermal_cal)
+    elif mode == "realistic":
+        cls = SignalMPCRealistic if use_signal else MPCRealistic
+        ems = cls(microgrid, thermal_cal, ev_hist)
+    else:
+        raise ValueError(f"unknown mode {mode!r}, expected 'perfect' or 'realistic'")
+    if disable_enforced:
+        ems.do_forced_charging = False
+    if gurobi_threads is not None:
+        ems.model.Params.Threads = gurobi_threads
+    record_solves(microgrid, ems)
+
+    end_time = microgrid.end_time
+    if days is not None:
+        end_time = microgrid.start_time + datetime.timedelta(days=days)
+
+    for asset, attr in [
+        ("EnergyPlus_0", "zn0_temp"),
+        ("EnergyPlus_0", "cur_t_low"),
+        ("EnergyPlus_0", "cur_t_up"),
+        ("Charger_0", "soc"),
+        ("WaterHeater_0", "t_tank"),
+    ]:
+        microgrid.attribute_to_log(asset, attr)
+
+    bar = simulation_bar(microgrid, end_time, f"MPC {mode} house {house_num}")
+    try:
+        while microgrid.utc_datetime < end_time:
+            microgrid.management_system.simulate_step()
+            bar.update(1)
+    finally:
+        bar.close()
+        ems.model.close()
+        for asset in microgrid.assets:
+            if isinstance(asset, EnergyPlus):
+                asset.stop_energyplus_thread()
+    return microgrid
+
+
+def extract_results(microgrid):
+    """Pull plain, picklable results out of a finished run.
+
+    The microgrid itself holds EnergyPlus threads and a Gurobi model, so it cannot be
+    returned from a worker process. Returns a dict with:
+      kpis       DayAheadEngie KPIs at the end of the run (opex is billed at the real price)
+      power      one row per step, one column per asset, Power.electrical in kW
+                 (PublicGrid_0: positive = offtake, negative = injection, as in co2.py)
+      attributes the attribute_to_log series (indoor temp, comfort bounds, EV soc, tank temp)
+      solves     one row per MPC solve: Gurobi status and runtime (see record_solves)
+      time_step_h
+    Timestamps are kept as recorded (tz-aware). power_hist stamps the start of each step,
+    attributes_hist the end (datetime + time_step), so the two frames are offset by one step.
+    """
+    kpis = {k: float(v) for k, v in microgrid.tot_reward.KPIs.items()}
+
+    node0 = microgrid.power_hist[0]  # single-node house configs
+    power = pd.DataFrame(
+        {name: [p.electrical for p in values] for name, values in node0.items() if name != "datetime"},
+        index=pd.DatetimeIndex(node0["datetime"]),
+    )
+
+    attributes = {}
+    for asset, att_dict in microgrid.attributes_hist.items():
+        index = pd.DatetimeIndex(att_dict["datetime"])
+        for att_name, values in att_dict.items():
+            if att_name != "datetime":
+                attributes[f"{asset.name}.{att_name}"] = pd.Series(values, index=index)
+    attributes = pd.DataFrame(attributes)
+
+    solves = pd.DataFrame(
+        getattr(microgrid, "solve_log", []), columns=["datetime", "status", "runtime_s"]
+    ).set_index("datetime")
+
+    return {
+        "kpis": kpis,
+        "power": power,
+        "attributes": attributes,
+        "solves": solves,
+        "time_step_h": microgrid.time_step.total_seconds() / 3600,
+    }
+
+
+def run_isolated(house_num, **kwargs):
+    """Run one house inside its own temporary working directory and return extract_results.
+
+    simugrid launches EnergyPlus with `-d out`, relative to the current directory, so runs
+    sharing a directory overwrite each other's output. This also covers calibration, which
+    runs EnergyPlus inside run_one_house_mpc when the cache is empty.
+
+    os.chdir is process-wide: call this in separate PROCESSES (e.g. ProcessPoolExecutor),
+    never threads. The previous working directory is restored afterwards. All paths used by
+    run_one_house_mpc are absolute.
+    """
+    previous_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix=f"eplus_house{house_num}_") as run_dir:
+        os.chdir(run_dir)
+        try:
+            microgrid = run_one_house_mpc(house_num, **kwargs)
+            return extract_results(microgrid)
+        finally:
+            os.chdir(previous_cwd)
