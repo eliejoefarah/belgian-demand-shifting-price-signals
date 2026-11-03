@@ -52,7 +52,7 @@ dependencies:
   - graphviz=14.1.2
   - gtk3=3.24.52
   - gts=0.7.6
-  - gurobi=13.0.2
+  - gurobi=13.0.3
   - harfbuzz=14.3.1
   - hicolor-icon-theme=0.17
   - icu=78.3
