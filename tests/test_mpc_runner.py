@@ -16,9 +16,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import fleet_harness.mpc_runner as mpc_runner
 from fleet_harness.mpc_runner import (
     PAPER_ROOT,
     add_control_signal,
+    calibration_year,
+    get_calibration,
+    house_config_path,
     load_house_price_and_tariffs,
     parsed_house,
     real_price_day_ahead_cost,
@@ -91,6 +95,50 @@ def test_shifted_config_matches_paper_tmp_2023_config(tmp_path):
     paper_path = tmp_2023_config(str(src))
     assert paper_path == str(tmp_path / "houses_tmp_2023" / HOUSE_CONFIG.name)
     assert ours == json.loads(open(paper_path).read())
+
+
+# ---------------------------------------------------------------------------
+# Fast: run year -> config and calibration year
+# ---------------------------------------------------------------------------
+
+def test_calibration_year_rule():
+    assert calibration_year("realistic", 2023) == 2022  # Julian's rule
+    assert calibration_year("perfect", 2023) == 2023  # Julian's rule
+    assert calibration_year("realistic", 2022) == 2023  # never in-sample EV history
+    assert calibration_year("perfect", 2022) == 2022
+    with pytest.raises(ValueError, match="year"):
+        calibration_year("realistic", "2022")
+    with pytest.raises(ValueError, match="year"):
+        calibration_year("realistic", 2021)
+    with pytest.raises(ValueError, match="mode"):
+        calibration_year("rbc", 2023)
+
+
+@needs_paper_data
+def test_house_config_path_per_year():
+    cfg_2022 = json.loads(open(house_config_path(HOUSE, 2022)).read())["Microgrid"]
+    cfg_2023 = json.loads(open(house_config_path(HOUSE, 2023)).read())["Microgrid"]
+    assert cfg_2022["start_time"].startswith("2022/01/01")
+    assert cfg_2023["start_time"].startswith("2023/01/01")
+
+
+@needs_paper_data
+@pytest.mark.parametrize(
+    "mode, year, cal_year",
+    [("realistic", 2023, 2022), ("realistic", 2022, 2023), ("perfect", 2022, 2022)],
+)
+def test_get_calibration_source_and_cache_name(tmp_path, monkeypatch, mode, year, cal_year):
+    """get_calibration fits on the calibration year's config and caches under that year."""
+    seen = []
+    monkeypatch.setattr(mpc_runner, "CAL_DIR", tmp_path)
+    monkeypatch.setattr(
+        mpc_runner, "get_energyplus_calibration", lambda cfg: seen.append(cfg) or (["thermal"], ["ev"])
+    )
+    assert get_calibration(HOUSE, mode, year=year) == (["thermal"], ["ev"])
+    assert seen == [house_config_path(HOUSE, cal_year)]
+    assert [f.name for f in tmp_path.iterdir()] == [f"house_{HOUSE}_500_{mode}_cal{cal_year}.pkl"]
+    get_calibration(HOUSE, mode, year=year)  # second call reads the cache
+    assert len(seen) == 1
 
 
 def _write_then_read(src):
@@ -195,3 +243,17 @@ def test_opex_billed_at_real_price(price_and_tariffs, flat, run_flat_signal):
     at_signal = real_price_day_ahead_cost(g, dt, flat, **extras)
     assert r["kpis"]["day_ahead"] == pytest.approx(at_real, abs=1e-6)
     assert abs(at_signal - at_real) > 1e-3  # the check can tell the two apart
+
+
+@pytest.mark.slow
+@needs_paper_data
+def test_run_2022_starts_in_2022_and_bills_2022_price():
+    """year=2022: simulates 2022 (original config) and DayAheadEngie bills the 2022 price."""
+    r = run_isolated(HOUSE, days=1, year=2022)
+    grid = r["power"]["PublicGrid_0"]
+    assert grid.index[0] == pd.Timestamp("2022-01-01", tz="UTC")
+    assert grid.index[-1] < pd.Timestamp("2022-01-02", tz="UTC")
+    price, extras = load_house_price_and_tariffs(HOUSE, year=2022)
+    assert r["kpis"]["day_ahead"] == pytest.approx(
+        real_price_day_ahead_cost(grid, r["time_step_h"], price, **extras), abs=1e-6
+    )

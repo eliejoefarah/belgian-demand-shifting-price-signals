@@ -70,9 +70,42 @@ def house_config_paths(house_num, tot_houses=500):
     return original, shifted_2023_config(original)
 
 
+YEARS = (2022, 2023)
+
+
+def _check_year(year):
+    if year not in YEARS:
+        raise ValueError(f"unknown year {year!r}, expected 2022 or 2023 (int)")
+
+
+def house_config_path(house_num, year=2023, tot_houses=500):
+    """Return the config that simulates `year`: the original file (2022) or the shifted one (2023)."""
+    _check_year(year)
+    original = str(PAPER_ROOT / "data" / f"houses_belgium_{tot_houses}" / f"house_{house_num}.json")
+    return original if year == 2022 else shifted_2023_config(original)
+
+
+def calibration_year(mode, year):
+    """Year whose simulation the MPC is calibrated on, for a run of `year`.
+
+    perfect:   the run year itself (Julian's rule: 2023 run -> 2023 calibration).
+    realistic: the other year. Julian calibrates a 2023 run on 2022, so the EV predictor's
+               history holds only sessions the house could have seen before. Calibrating a
+               2022 run on 2022 would put every 2022 session, the one being predicted
+               included, in the KNN training set (near-perfect EV forecasts). 2023 stands in
+               as the "previous" year for 2022 runs instead.
+    """
+    _check_year(year)
+    if mode == "perfect":
+        return year
+    if mode == "realistic":
+        return 2023 if year == 2022 else 2022
+    raise ValueError(f"unknown mode {mode!r}, expected 'perfect' or 'realistic'")
+
+
 @contextlib.contextmanager
-def parsed_house(house_num, tot_houses=500):
-    """Parse a house's 2023 config inside a temp dir, without simulating it.
+def parsed_house(house_num, tot_houses=500, year=2023):
+    """Parse a house's config for `year` inside a temp dir, without simulating it.
 
     parse_config_file already starts EnergyPlus (which writes to ./out), so this runs in a
     temp working directory and stops the EnergyPlus threads on exit. Process-wide chdir:
@@ -83,7 +116,7 @@ def parsed_house(house_num, tot_houses=500):
         os.chdir(d)
         microgrid = None
         try:
-            microgrid = parse_config_file(house_config_paths(house_num, tot_houses)[1])
+            microgrid = parse_config_file(house_config_path(house_num, year, tot_houses))
             yield microgrid
         finally:
             if microgrid is not None:
@@ -93,13 +126,13 @@ def parsed_house(house_num, tot_houses=500):
             os.chdir(previous_cwd)
 
 
-def load_house_price_and_tariffs(house_num, tot_houses=500):
-    """Return (real day-ahead price Series, {offtake_extra, injection_extra}) for a house.
+def load_house_price_and_tariffs(house_num, tot_houses=500, year=2023):
+    """Return (real day-ahead price Series, {offtake_extra, injection_extra}) for a house-year.
 
     The price index is timezone-naive UTC (the house configs use timezone UTC). The two
     extras are read at the first step; they are constant in the house configs.
     """
-    with parsed_house(house_num, tot_houses) as microgrid:
+    with parsed_house(house_num, tot_houses, year) as microgrid:
         env_values = microgrid.environments[0].env_values
         price = get_price_series(microgrid)
         extras = {k: float(env_values[k].value) for k in ("offtake_extra", "injection_extra")}
@@ -131,24 +164,24 @@ def real_price_day_ahead_cost(grid_kw, time_step_h, price, offtake_extra, inject
     return -float(np.where(energy > 0, offtake, injection).sum())
 
 
-def get_calibration(house_num, mode, tot_houses=500):
-    """Return (thermal calibration list, EV session history), cached on disk.
+def get_calibration(house_num, mode, tot_houses=500, year=2023):
+    """Return (thermal calibration list, EV session history) for a run of `year`, cached on disk.
 
-    Calibration is price-independent, so it is computed once per house and mode.
-    Realistic calibrates on the original 2022 config, perfect on the 2023 config,
-    the same rule as get_results.mpc_execution.
+    Calibration is price-independent, so it is computed once per house, mode and
+    calibration year. The calibration year follows calibration_year(): for 2023 runs this
+    is Julian's rule in get_results.mpc_execution (realistic on 2022, perfect on 2023).
+    The cache file is named after the calibration year, not the run year.
 
     A deep copy is returned every time: EasyForcaster appends new EV sessions to the
     history in place (forecaster.py:274-279), so reusing one object across runs would
     leak one run's sessions into the next run's EV predictor.
     """
-    path = CAL_DIR / f"house_{house_num}_{tot_houses}_{mode}.pkl"
+    cal_year = calibration_year(mode, year)
+    path = CAL_DIR / f"house_{house_num}_{tot_houses}_{mode}_cal{cal_year}.pkl"
     if path.exists():
         cal = pickle.loads(path.read_bytes())
     else:
-        original, cfg_2023 = house_config_paths(house_num, tot_houses)
-        source = original if mode == "realistic" else cfg_2023
-        cal = get_energyplus_calibration(source)
+        cal = get_energyplus_calibration(house_config_path(house_num, cal_year, tot_houses))
         CAL_DIR.mkdir(parents=True, exist_ok=True)
         path.write_bytes(pickle.dumps(cal))
     return copy.deepcopy(cal)
@@ -233,8 +266,9 @@ def run_one_house_mpc(
     use_signal=True,
     tot_houses=500,
     gurobi_threads=1,
+    year=2023,
 ):
-    """Run one house-year (or the first `days` days) with the MPC on the 2023 config.
+    """Run one house-year (or the first `days` days) of `year` (2022 or 2023) with the MPC.
 
     use_signal=False runs Julian's unmodified MPC classes with the same calibration and
     window, as the baseline for the equivalence check.
@@ -242,12 +276,14 @@ def run_one_house_mpc(
     decided 3 Nov (experiments/thread_check.py): all solves optimal, opex within 0.003 %,
     ~40 % more fleet throughput. The thread count changes how Gurobi breaks ties, so every
     run that is compared (baselines included) must use the same value.
+    The calibration year is the other year for realistic and the same year for perfect
+    (see calibration_year).
     """
-    _, cfg_2023 = house_config_paths(house_num, tot_houses)
-    thermal_cal, ev_hist = get_calibration(house_num, mode, tot_houses)
+    cfg = house_config_path(house_num, year, tot_houses)
+    thermal_cal, ev_hist = get_calibration(house_num, mode, tot_houses, year)
 
-    microgrid = parse_config_file(cfg_2023)
-    microgrid.config_file = Path(cfg_2023).name
+    microgrid = parse_config_file(cfg)
+    microgrid.config_file = Path(cfg).name
     if use_signal:
         add_control_signal(microgrid, signal_series)
     microgrid.set_reward(DayAheadEngie())
