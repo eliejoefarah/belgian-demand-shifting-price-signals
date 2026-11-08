@@ -26,17 +26,18 @@
 #     processes on one node share a session). 16 tasks on 16 nodes failed with "Too many
 #     sessions, 5 active sessions for a baseline of 2" (+ "Rate limit reached"). So 2 tasks.
 #  2. ulimit -u = 300 processes+threads per user per node; a full-year task used ~184 threads
-#     at 16 workers (~11.5 per house), so at most ~24 workers per node.
-# -> 2 tasks x 24 workers = 48 houses at once; 250 houses per task, heaviest first; ~30 min
-# per heavy house-year on Lyra -> ~4 h per task. --time has a margin.
+#     at 16 workers (~11.5 per house); 24 workers peaked at 272 (job 1988356), too close
+#     to 300 for an unattended run, so 20 workers (~230).
+# -> 2 tasks x 20 workers = 40 houses at once; 250 houses per task, heaviest first; ~30 min
+# per heavy house-year on Lyra -> ~5-5.5 h per task. --time has a margin.
 # Memory: ~0.6 GB per worker measured, Gurobi SoftMemLimit allows 2 GB per solve:
-# 3 GB per core = 72 GB per task (nodes have 132 GB).
+# 3 GB per core = 60 GB per task (nodes have 132 GB).
 
 #SBATCH --job-name=fleet_baseline
 #SBATCH --partition=batch
 #SBATCH --array=0-1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=24
+#SBATCH --cpus-per-task=20
 #SBATCH --mem-per-cpu=3000M
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/fleet_%A_%a.out
