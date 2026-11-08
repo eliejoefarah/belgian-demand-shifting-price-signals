@@ -11,7 +11,8 @@
 #   sbatch --export=ALL,YEAR=2023 hpc/fleet_baseline.slurm
 #   sbatch --export=ALL,YEAR=2022 hpc/fleet_baseline.slurm
 # Smoke test first (1 week, 2 houses per stratum, one task on the debug partition):
-#   sbatch --array=0 --partition=debug --cpus-per-task=16 --time=01:00:00 \
+# (debug: 1 job at a time per user, 1 h, nodes of 16 cores / 64 GB but -c 16 is refused; -c 8 works)
+#   sbatch --array=0 --partition=debug --cpus-per-task=8 --mem-per-cpu=1500M --time=01:00:00 \
 #       --export=ALL,YEAR=2023,EXTRA="--houses smoke --days 7 --name smoke_2023 --n-shards 1" hpc/fleet_baseline.slurm
 # (EXTRA's --n-shards 1 comes after the script's --n-shards 16; argparse keeps the last one.)
 # Resubmit only some failed tasks: --array=3,7 (the script always passes --n-shards 16, so

@@ -279,6 +279,7 @@ def test_settings_mismatch_flags_a_short_run(tmp_path):
     assert fleet.settings_mismatch(tmp_path, 4, SETTINGS) == {}
 
 
+@needs_paper_data  # main() builds the house inventory from the paper's house configs
 def test_main_refuses_done_houses_with_other_settings(tmp_path):
     out = tmp_path / "baseline_realistic_2023"
     fleet.save_house_result(out, 0, synthetic_result(), saved_meta({**SETTINGS, "days": 7}))
