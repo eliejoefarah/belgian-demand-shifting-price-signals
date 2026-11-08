@@ -44,8 +44,9 @@ set +u  # some conda activation scripts read unset variables
 conda activate belgian_dwellings
 set -u
 
-# TODO: Gurobi academic WLS licence (works on any node with internet access)
-# export GRB_LICENSE_FILE=$HOME/gurobi.lic
+# Gurobi academic WLS licence 2882419 (expires 7 Feb 2027, extendable; WLS needs internet on
+# the node). The file holds a secret: chmod 600, never commit it.
+export GRB_LICENSE_FILE=$HOME/gurobi.lic
 
 # EnergyPlus temp run folders (tempfile) on the node-local disk, not the shared filesystem.
 export TMPDIR="${LOCALSCRATCH:-${TMPDIR:-/tmp}}"
