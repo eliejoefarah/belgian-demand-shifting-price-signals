@@ -61,6 +61,11 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export POLARS_MAX_THREADS=1 RAYON_NUM_THREADS=1 NUMEXPR_MAX_THREADS=1 ARROW_IO_THREADS=1
 export _RJEM_MALLOC_CONF=background_thread:false   # polars' jemalloc: no background threads
 echo "thread limit (ulimit -u): $(ulimit -u)  cgroup pids.max: $(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo n/a)"
+# Lyra: ulimit -u = 300 processes+threads per user PER NODE, shared by all my tasks on that
+# node. Log my thread count on this node every 15 s to see the headroom.
+(while sleep 15; do echo "threads on $(hostname): $(ps -L -u "$USER" --no-headers | wc -l)"; done) &
+MONITOR=$!
+trap 'kill $MONITOR 2>/dev/null' EXIT
 
 echo "node $(hostname)  task ${SLURM_ARRAY_TASK_ID:-}  cpus ${SLURM_CPUS_PER_TASK}  TMPDIR $TMPDIR"
 python -u -m experiments.fleet_baseline --year "${YEAR:?set YEAR=2022 or 2023}" \
