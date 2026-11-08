@@ -2,7 +2,7 @@
 import pandas as pd
 import pytest
 
-from price_signals.carbon_intensity import compute_intensity
+from price_signals.carbon_intensity import compute_intensity, gas_share
 from price_signals.emission_factors import (
     DIRECT_FACTORS,
     LIFECYCLE_FACTORS,
@@ -54,3 +54,27 @@ def test_compute_intensity_rejects_zero_generation():
 def test_compute_intensity_rejects_unknown_factor_set():
     with pytest.raises(ValueError, match="factor_set"):
         compute_intensity(_mix([[100.0, 300.0]]), factor_set="marginal")
+
+
+def test_gas_share_is_gas_over_total():
+    # 25 % gas, then 0 % gas.
+    share = gas_share(_mix([[100.0, 300.0], [0.0, 400.0]]))
+    assert share.tolist() == pytest.approx([0.25, 0.0])
+    assert share.name == "gas_share"
+
+
+def test_gas_share_treats_empty_cells_as_zero():
+    # An empty gas cell is no gas; an empty other cell drops out of the total.
+    nan = float("nan")
+    share = gas_share(_mix([[nan, 300.0], [100.0, nan]]))
+    assert share.tolist() == pytest.approx([0.0, 1.0])
+
+
+def test_gas_share_rejects_missing_gas_column():
+    with pytest.raises(ValueError, match="Fossil Gas"):
+        gas_share(_mix([[100.0, 300.0]], columns=("Nuclear", "Solar")))
+
+
+def test_gas_share_rejects_zero_generation():
+    with pytest.raises(ValueError, match="zero or negative total generation"):
+        gas_share(_mix([[100.0, 300.0], [0.0, 0.0]]))

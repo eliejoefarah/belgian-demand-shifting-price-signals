@@ -53,6 +53,38 @@ def compute_intensity(mix: pd.DataFrame, factor_set: str = "direct") -> pd.Serie
     return intensity
 
 
+GAS = "Fossil Gas"
+
+
+def gas_share(mix: pd.DataFrame) -> pd.Series:
+    """Share (0-1) of Belgian generation coming from gas plants, per timestep of `mix`.
+
+        gas_share[t] = Fossil Gas[t] / total generation[t]
+
+    Same conventions as compute_intensity: production-based (imports ignored), the
+    denominator is total generation, empty cells count as 0 (pandas skips NaN in the sum;
+    a missing gas value is taken as no gas), and pumped-storage charging is already
+    excluded by load_generation_mix. The thesis asks about reducing gas-plant use, and
+    the marginal emission factor may be flat (gas marginal most hours), so this series
+    carries the hour-to-hour gas variation directly.
+
+    Raises ValueError if there is no "Fossil Gas" column (every hour would read 0) or
+    if total generation is <= 0 at any timestep.
+    """
+    if GAS not in mix.columns:
+        raise ValueError(f"no {GAS!r} column in the mix; columns: {sorted(mix.columns)}")
+    total = mix.sum(axis=1)
+    bad = total[total <= 0]
+    if len(bad):
+        raise ValueError(
+            f"zero or negative total generation at {len(bad)} timestamp(s), "
+            f"e.g. {bad.index[0]!r} -- can't compute a share there"
+        )
+    share = mix[GAS].fillna(0.0) / total
+    share.name = "gas_share"
+    return share
+
+
 def generation_weighted_average(intensity: pd.Series, mix: pd.DataFrame) -> float:
     """Generation-weighted annual average (gCO2/kWh). Sanity check against
     Unnewehr et al. (2022): BE ~195-219 in 2018; 2023 should be lower."""
