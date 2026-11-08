@@ -14,28 +14,31 @@
 # (debug: 1 job at a time per user, 1 h, nodes of 16 cores / 64 GB but -c 16 is refused; -c 8 works)
 #   sbatch --array=0 --partition=debug --cpus-per-task=8 --mem-per-cpu=1500M --time=01:00:00 \
 #       --export=ALL,YEAR=2023,EXTRA="--houses smoke --days 7 --name smoke_2023 --n-shards 1" hpc/fleet_baseline.slurm
-# (EXTRA's --n-shards 1 comes after the script's --n-shards 16; argparse keeps the last one.)
-# Resubmit only some failed tasks: --array=3,7 (the script always passes --n-shards 16, so
-# task k still takes houses k, k+16, ...; keep it equal to the size of --array=0-15).
+# (EXTRA's --n-shards 1 comes after the script's --n-shards 2; argparse keeps the last one.)
+# Resubmit only one task: --array=1 (the script always passes --n-shards 2, so task k
+# still takes houses k, k+2, ...; keep it equal to the size of --array=0-1).
 #
 # Resumable: resubmitting the same command only runs houses without a house_{n}.json, and
 # stops if a done house was saved with other settings (e.g. a smoke test in the same folder).
 #
-# Sizing: 16 tasks x 16 cores = 256 cores = the per-user limit. Half-node tasks, because the
-# batch nodes are usually partly busy (8 Nov: ~21 idle cores per mixed node), so 32-core
-# tasks would wait for a fully free node. 500 houses / 16 = 32 houses per task -> 2 rounds of
-# 16. Laptop timings: ~30 min per house-year alone, ~65 min per worker under load, so
-# ~1-2.2 h per task; --time has a margin. Replace with the smoke-test timing.
+# Sizing (8 Nov, after two failed full runs): two hard limits.
+#  1. Gurobi academic WLS licence: "session baseline 2" = at most 2 MACHINES at once (all
+#     processes on one node share a session). 16 tasks on 16 nodes failed with "Too many
+#     sessions, 5 active sessions for a baseline of 2" (+ "Rate limit reached"). So 2 tasks.
+#  2. ulimit -u = 300 processes+threads per user per node; a full-year task used ~184 threads
+#     at 16 workers (~11.5 per house), so at most ~24 workers per node.
+# -> 2 tasks x 24 workers = 48 houses at once; 250 houses per task, heaviest first; ~30 min
+# per heavy house-year on Lyra -> ~4 h per task. --time has a margin.
 # Memory: ~0.6 GB per worker measured, Gurobi SoftMemLimit allows 2 GB per solve:
-# 3 GB per core = 48 GB per task (nodes have 132 GB).
+# 3 GB per core = 72 GB per task (nodes have 132 GB).
 
 #SBATCH --job-name=fleet_baseline
 #SBATCH --partition=batch
-#SBATCH --array=0-15
+#SBATCH --array=0-1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=24
 #SBATCH --mem-per-cpu=3000M
-#SBATCH --time=06:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/fleet_%A_%a.out
 
 set -euo pipefail
@@ -69,4 +72,4 @@ trap 'kill $MONITOR 2>/dev/null' EXIT
 
 echo "node $(hostname)  task ${SLURM_ARRAY_TASK_ID:-}  cpus ${SLURM_CPUS_PER_TASK}  TMPDIR $TMPDIR"
 python -u -m experiments.fleet_baseline --year "${YEAR:?set YEAR=2022 or 2023}" \
-    --workers "${SLURM_CPUS_PER_TASK}" --n-shards 16 ${EXTRA:-}
+    --workers "${SLURM_CPUS_PER_TASK}" --n-shards 2 ${EXTRA:-}
