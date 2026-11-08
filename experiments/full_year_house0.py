@@ -1,7 +1,9 @@
 """Phase 1 'done when' run: house 0, full 2023, MPC realistic, real price vs flat signal.
 
-Runs both years in parallel (one process each, own EnergyPlus dir via run_isolated),
-saves the extracted results to results/mpc_runs/, and prints timing and KPIs.
+Runs the two signals (real price, flat signal) in parallel, both on 2023 (one process each,
+own EnergyPlus dir via run_isolated), saves the extracted results to results/mpc_runs/
+(pickle + a _signal.csv with the real price and the control signal per step), and prints
+timing and KPIs.
 
 Run from the repo root:
     python -m experiments.full_year_house0 2>&1 | tee results/mpc_runs/full_year_house0.log
@@ -21,7 +23,13 @@ HOUSE = 0
 
 
 def flat_signal(house_num):
-    """The house's own real day-ahead price, flattened to its yearly mean."""
+    """The house's own real day-ahead price, flattened to the mean of the WHOLE price file.
+
+    get_price_series holds the whole file (2021-12-30 .. 2024-01-01), so this mean is
+    0.1705 EUR/kWh, not the 2023 mean (0.0973). Kept as is so the 3 Nov run-4 numbers stay
+    reproducible; new signals should be built from the simulated year only.
+    Note: run 4 used 4 Gurobi threads; this script now runs with the 1-thread default.
+    """
     import os
     import tempfile
 
@@ -70,6 +78,7 @@ def main():
     for name, r in results.items():
         path = OUT_DIR / f"house{HOUSE}_2023_realistic_{name}.pkl"
         path.write_bytes(pickle.dumps(r))
+        r["signal"].to_csv(path.with_name(path.stem + "_signal.csv"))  # price + signal, for plots
         grid = r["power"]["PublicGrid_0"]
         dt = r["time_step_h"]
         print(f"\n== {name}: {r['elapsed_s'] / 60:.1f} min, {len(grid)} steps, saved {path.name}")

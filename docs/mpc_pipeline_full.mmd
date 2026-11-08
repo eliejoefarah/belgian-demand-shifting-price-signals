@@ -7,7 +7,7 @@ subgraph S0["0 · Inputs and preprocessing: get_results.py, tmp_2023_config.py"]
     direction TB
     GEN["generate_results(house_num=500, ems_names)<br/>folder = data/houses_belgium_500/<br/>one job per house_i.json, multiprocessing pool"]
     CFG22["house_i.json, ORIGINAL year 2022<br/>Microgrid: timezone UTC, 2022-01-01 to 2023-01-01, time_step 15 min<br/>Assets: EnergyPlus_0, WaterHeater_0, Charger_0, PublicGrid_0, PV, Consumer, battery if any<br/>Environments: day_ahead_price, offtake_extra, injection_extra,<br/>kwh_offtake_cost, capacity_tariff, year_cost, epw weather,<br/>Consumer_electric, PV, WaterHeater_flow, det/soc_i/soc_f/p_max/capa per charger"]
-    TMP["tmp_2023_config(config_path)<br/>copy into data/houses_belgium_500_tmp_2023/<br/>start_time 2022→2023, end_time 2023→2024<br/>EnergyPlus epw_weather 2022→2023<br/>original config never modified"]
+    TMP["tmp_2023_config(config_path)<br/>copy into data/houses_belgium_500_tmp_2023/<br/>start_time 2022→2023, end_time 2023→2024<br/>EnergyPlus epw_weather 2022→2023<br/>original config never modified<br/>THESIS: fleet_harness shifted_2023_config, same output,<br/>written atomically (temp file + os.replace), parallel-safe;<br/>year=2022 runs use the original config directly"]
     CFG23["house_i.json, TEST year 2023<br/>35,040 steps of 15 min"]
     NAME{"EMS name string<br/>MPC_perfect / MPC_realistic<br/>+ optional _no_enforcement"}
     MPCEXEC["get_results.mpc_execution<br/>'perfect' in name → mode perfect<br/>else → mode realistic<br/>'no_enforcement' in name → disable_enforced = True"]
@@ -20,7 +20,7 @@ end
 %% =====================================================================
 subgraph S1["1 · Calibration: calibrate_mpc.get_energyplus_calibration, once per house, price-independent, cacheable"]
     direction TB
-    CALSRC{"Which config?<br/>realistic → original 2022 config, no peeking at 2023<br/>perfect → 2023 config"}
+    CALSRC{"Which config?<br/>realistic → original 2022 config, no peeking at 2023<br/>perfect → 2023 config<br/>THESIS calibration_year: realistic → the OTHER year<br/>(2023 run → 2022, 2022 run → 2023), perfect → run year<br/>cached in results/calibration/, deep copy per run"}
     CALPARSE["execute_config: parse_config_file<br/>EnergyPlus extra outputs tc_var: zone temp, fan electricity,<br/>main + backup coil heat and electricity, crankcase, defrost,<br/>cooling coil electricity and energy"]
     CALEMS["Controller = plain HouseManager<br/>update_control_points does nothing, no optimisation, price ignored<br/>heating sp = lower comfort bound, cooling sp = upper bound<br/>EV charges at max power on plug-in<br/>water heater: full power below low setpoint, else off<br/>battery idle"]
     CALLOOP["Full-year step loop, 15 min<br/>each step record EnergyPlus readings:<br/>indoor_temp_C, heat_energy_main/backup_kWh, cool_energy_kWh,<br/>electricity per coil, + epw temp_air, dir_norm_rad<br/>on each EV arrival: get_new_ev_forecasting_values"]
@@ -45,12 +45,12 @@ subgraph S2["2 · Setup: run_mpc.execute_mpc"]
     direction TB
     CACHECHK{"cached_calibration given?<br/>no → run calibration on the same config"}
     PARSE["parse_config_file(2023 config) → microgrid<br/>clock: start_time, end_time, time_step, utc_datetime<br/>nodes + assets, environments[0].env_values<br/>power_hist, attributes_hist, reward_hist, env_hist"]
-    SWAP["PLANNED (PLAN.md Phase 1): add env value control_signal<br/>BaseListValue.construct_from_two_lists + sample_date<br/>default = copy of day_ahead_price<br/>MPC reads control_signal, day_ahead_price stays the REAL price"]
+    SWAP["THESIS, implemented: mpc_runner.add_control_signal<br/>new env value control_signal = a NEW BaseListValue<br/>(construct_from_two_lists + sample_date), own cur_index pointer<br/>never the same object as day_ahead_price, else sampled twice per step<br/>default = copy of day_ahead_price, index must equal the price index<br/>MPC plans on control_signal, day_ahead_price stays the REAL price"]
     REW["microgrid.set_reward(DayAheadEngie)<br/>KPIs: day_ahead, trans_dis, capacity, year_fixed,<br/>opex, discomfort, forced_charged_energy, soc_quantile"]
     EMSSEL{"mode"}
-    PMPC["PerfectMPC(microgrid, calibration)<br/>forecaster = PerfectForecaster<br/>fixed_horizon = True"]
-    RMPC["MPCRealistic(microgrid, calibration, ev_forecasting_values)<br/>forecaster = EasyForcaster<br/>fixed_horizon = False"]
-    INIT["MPCManager.__init__<br/>gp.Model mpc, silent env, Threads 4, TimeLimit 10 s, SoftMemLimit 2 GB<br/>store_assets: batteries, chargers, EnergyPlus, water heaters<br/>monthly_peak = 2.5 kW<br/>registers itself as microgrid.management_system"]
+    PMPC["PerfectMPC(microgrid, calibration)<br/>forecaster = PerfectForecaster<br/>fixed_horizon = True<br/>THESIS: SignalPerfectMPC"]
+    RMPC["MPCRealistic(microgrid, calibration, ev_forecasting_values)<br/>forecaster = EasyForcaster<br/>fixed_horizon = False<br/>THESIS: SignalMPCRealistic"]
+    INIT["MPCManager.__init__<br/>gp.Model mpc, silent env, Threads 4, TimeLimit 10 s, SoftMemLimit 2 GB<br/>THESIS: Threads 1 for every run (gurobi_threads=1)<br/>store_assets: batteries, chargers, EnergyPlus, water heaters<br/>monthly_peak = 2.5 kW<br/>registers itself as microgrid.management_system"]
     ENF{"disable_enforced?<br/>yes → do_forced_charging = False"}
     ATTLOG["attribute_to_log, recorded every step into attributes_hist:<br/>EnergyPlus_0 zn0_temp, cur_t_low, cur_t_up<br/>Charger_0 soc, WaterHeater_0 t_tank"]
     BAR["simulation_bar progress bar"]
@@ -76,7 +76,7 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
         PEAK["update_grid_peak<br/>1st of month 00:00 UTC or start → monthly_peak = 2.5 kW<br/>else monthly_peak = max(monthly_peak, last PublicGrid_0 power)"]
         HOR{"update_horizon"}
         HORP["Perfect: horizon = 48 h / 0.25 h = 192 steps, constant"]
-        HORR["Realistic: convert to Europe/Brussels<br/>before 14:00 → until midnight tonight<br/>from 14:00 → until midnight tomorrow<br/>DAY_AHEAD_HOUR = 14, horizon = 40 to 136 steps"]
+        HORR["Realistic: convert to Europe/Brussels<br/>before 14:00 → until midnight tonight<br/>from 14:00 → until midnight tomorrow<br/>DAY_AHEAD_HOUR = 14, horizon = 41 to 136 steps"]
         BUILD{"build_model(retry)<br/>first call → build everything<br/>fixed horizon → remove constraints, rebuild constraints<br/>variable horizon → remove all, rebuild sets + vars + constraints + objective"}
         SETS["build_sets<br/>time = range(horizon)<br/>batt_id, charger_id, energyplus_id, waterheater_id"]
         VARS["build_vars, per asset × t:<br/>batt_pos ∈ 0..max_prod, batt_neg ∈ −max_cons..0, batt_soc ∈ 0..1<br/>charger_power ∈ 0..max_cons, ev_soc ∈ 0..1<br/>energyplus_heating ≤ heating_power_w/1000/main_eff<br/>energyplus_backup_heating ≤ backup_power_w/1000/backup_eff<br/>energyplus_cooling ≤ cooling_power_w/1000/cool_eff  (electric kW)<br/>indoor_temp free<br/>waterheater_power ∈ 0..max_cons, tank_temp ∈ 0..high_setpoint<br/>heater_condition BINARY → model is a MILP<br/>grid_power free, sign: + injection, − offtake<br/>grid_peak ≥ 2.5<br/>extra_vat_offtake, extra_cost_offtake, extra_cost_injection, trans_dis_cost ≥ 0<br/>obj_cost free"]
@@ -104,10 +104,10 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
             RF_WH["waterheater_forecast: naive WaterHeater_flow"]
             RF_LD["get_total_load: naive Σ PV − Σ Consumer_electric"]
             RF_EV{"get_charger_basis<br/>car state?"}
-            EV_ARR["Car just arrived: init det #gt; 0<br/>features: hour, weekday, prev_soc_difference,<br/>prev_detention, time_since_prev_charge<br/>train_ev_forecaster: KNN regressor + StandardScaler<br/>5 random 80/20 splits × all feature subsets → best by MAE<br/>retrain on all history, predict detention and soc_difference<br/>pred_soc_i = 0.95 − soc_difference, pred_soc_f = 0.95<br/>stretch det if too short to be feasible<br/>append session to history, log MAE"]
-            EV_CON["Car still connected<br/>update prediction by elapsed time and charged soc<br/>car full → det = 1<br/>predicted end reached or forced charging started →<br/>extend 2 h at max power"]
+            EV_ARR["Car just arrived: init det #gt; 0<br/>features: arrival hour (fractional, UTC), weekday, prev_soc_difference,<br/>prev_detention, time_since_prev_charge<br/>train_ev_forecaster: KNeighborsRegressor (k = 5) + StandardScaler<br/>5 random 80/20 splits × all 31 feature subsets → lowest mean MAE<br/>retrain on all history, predict detention and soc_difference<br/>pred_soc_i = 0.95 − soc_difference, pred_soc_f = 0.95<br/>stretch det if too short to be feasible<br/>append session to history, log prediction and real value (MAE computed later)"]
+            EV_CON["Car still connected<br/>update prediction by elapsed time and charged soc<br/>car full → det = 1<br/>predicted end reached, predicted soc reached soc_f,<br/>or forced charging started → extend 2 h at max power"]
             EV_NONE["No car: zeros"]
-            EV_PAD["Only step 0 filled, rest padded with 0<br/>→ no future arrivals within horizon"]
+            EV_PAD["Only step 0 filled, rest padded with 0<br/>→ no future arrivals within horizon<br/>then the inherited PerfectForecaster.charger_forecast spreads it:<br/>det counts down over the stay, soc_f = 0.95 at step pred_det − 1"]
             NAIVE --> RF_EP
             NAIVE --> RF_WH
             NAIVE --> RF_LD
@@ -115,7 +115,7 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
             RF_EV -- connected --> EV_CON --> EV_PAD
             RF_EV -- absent --> EV_NONE --> EV_PAD
         end
-        FDICT["forecast dict<br/>det, soc_i, soc_f, p_max, cap,<br/>outdoor_temperature, solar_radiation,<br/>lower_bound, upper_bound, flow, pv_and_load"]
+        FDICT["forecast dict<br/>windows past end_time WRAP to start_time of the same year<br/>(get_forec_time_samples): last ≤ 48 h of the year use 1 Jan data<br/>det, soc_i, soc_f, p_max, cap,<br/>outdoor_temperature, solar_radiation,<br/>lower_bound, upper_bound, flow, pv_and_load"]
         FSEL -- perfect --> FPERF --> FDICT
         FSEL -- realistic --> FREAL --> FDICT
     end
@@ -126,7 +126,7 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
         FP0["forced_power overwritten to 0 (line 292)<br/>forced EV charging is NOT in the optimisation,<br/>it is applied afterwards in HouseManager.simulate_step"]
         C_GRID["set_grid_power_constr<br/>grid_power_t = (batt_pos + batt_neg) − charger_power<br/>− (heating + backup + cooling electric) − waterheater_power<br/>+ pv_and_load_t"]
         C_BATT["set_batt_soc_constr<br/>soc_t = soc_t−1 + (batt_pos × discharge_eff + batt_neg / charge_eff) × dt / size<br/>soc_−1 = current battery soc"]
-        C_EVSOC["set_charger_soc_constr<br/>soc_f_t #gt; 0.01 → ev_soc_t = soc_f_t (departure target)<br/>det_t = 0 → ev_soc_t = 0 (not connected)<br/>t = 0: charger_power ≥ forced_power (= 0)<br/>connected: ev_soc_t = soc_prev + charger_power × dt × eff / cap"]
+        C_EVSOC["set_charger_soc_constr<br/>soc_f_t #gt; 0.01 → ev_soc_t = soc_f_t (departure target)<br/>det_t = 0 → ev_soc_t = 0 (not connected)<br/>t = 0: charger_power ≥ forced_power (= 0)<br/>connected: ev_soc_t = soc_prev + charger_power × dt × eff / cap<br/>on the arrival step soc_prev = forecast soc_i if soc_i #gt; 0.001"]
         C_EVCURVE["set_charger_power_curve_constr, only if charge_curve<br/>linear taper: p_max at soc 0.9 → 1.4 kW at soc 1.0<br/>charger_power_t ≤ a × ev_soc_t + b while connected"]
         C_TEMP["set_indoor_temp_constr, RC model, Arroyo et al. 2020<br/>T_0 = EnergyPlus indoor_temp_C reading, 20 °C if none<br/>retry #gt; 0 → T_0 shifted 0.1 × retry °C toward comfort band<br/>P_th = (backup × backup_eff + heating × main_eff − cooling × cool_eff) × 1000<br/>T_t = T_t−1 + dt/C × (P_th + gA × solar_t + (T_out_t − T_t−1)/R)"]
         C_COMF["set_comfort_bounds_constr, HARD<br/>lower_bound_t ≤ indoor_temp_t ≤ upper_bound_t"]
@@ -138,7 +138,7 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
     %% ---------- 3d. Objective ----------
     subgraph S3D["3d · Objective: set_cost_constr (line 481) + build_obj (line 714)"]
         direction TB
-        PRICE["Read once per solve, NOT forecast:<br/>day_ahead_t = env_values day_ahead_price .get_forecast(now, now + horizon)<br/>line 501, perfect foresight over the horizon<br/>PLANNED: read control_signal here instead<br/>tariffs read at current step: offtake_extra, injection_extra,<br/>kwh_offtake_cost, capacity_tariff"]
+        PRICE["Read once per solve, NOT forecast:<br/>day_ahead_t = env_values day_ahead_price .get_forecast(now, now + horizon)<br/>line 501, perfect foresight over the horizon<br/>THESIS, implemented: ControlSignalMixin puts control_signal<br/>under the day_ahead_price key only during set_cost_constr,<br/>restored in finally → the MPC plans on the signal, the bill uses the real price<br/>tariffs read at current step: offtake_extra, injection_extra,<br/>kwh_offtake_cost, capacity_tariff"]
         O_DA["day_ahead_cost = Σ_t −grid_power_t × dt × day_ahead_t"]
         O_VAT["extra_vat_offtake_t ≥ −grid_power_t × (day_ahead_t + offtake_extra) × dt × 0.06<br/>if day_ahead_t + offtake_extra ≥ 0, else = 0"]
         O_OFF["extra_cost_offtake_t ≥ −grid_power_t × dt × offtake_extra"]
@@ -146,7 +146,7 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
         O_TD["trans_dis_cost_t ≥ −grid_power_t × dt × kwh_offtake_cost"]
         O_CAP["cap_cost = grid_peak × capacity_tariff"]
         O_SUM["obj_cost = day_ahead_cost + Σ_t (vat + offtake_extra + injection_extra)<br/>+ Σ_t trans_dis_cost + cap_cost<br/>≥ constraints + minimisation → each extra = its cost, 0 on the other side"]
-        O_MIN["build_obj: setObjective(obj_cost, MINIMIZE)<br/>cost only: no comfort term, no CO₂ term, no EV penalty"]
+        O_MIN["build_obj, after build_constr: setObjective(obj_cost, MINIMIZE)<br/>cost only: no comfort term, no CO₂ term, no EV penalty"]
         PRICE --> O_DA
         PRICE --> O_VAT
         PRICE --> O_OFF
@@ -159,7 +159,6 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
         O_INJ --> O_SUM
         O_TD --> O_SUM
         O_CAP --> O_SUM
-        O_SUM --> O_MIN
     end
 
     %% ---------- 3e. Solve ----------
@@ -167,13 +166,13 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
         direction TB
         OPT["model.optimize, Gurobi MILP"]
         STAT{"status"}
-        RETRY["retry += 1 → build_model(retry)<br/>shifts T_0 by 0.1 × retry °C toward the comfort band<br/>then optimize again"]
-        FAIL["retry #gt; 40 → write debug_mpc/debug_house_y_m_d.lp<br/>return, previous control points kept"]
-        EXTRACT["Take step t = 0 of the plan only:<br/>battery power_sp = batt_pos + batt_neg<br/>charger power_sp = −charger_power<br/>water heater power_sp = −waterheater_power<br/>EnergyPlus gets TEMPERATURE setpoints, not kW:<br/>heating #gt; 0 → heating_sp = planned indoor_temp_0, cooling_sp 40<br/>cooling #gt; 0 → heating_sp 5, cooling_sp = planned indoor_temp_0<br/>else → heating_sp 5, cooling_sp 40, heat pump off"]
+        RETRY["retry += 1 → build_model(retry)<br/>retry_temp_adjust: shifts T_0 by 0.1 × retry °C toward<br/>the comfort bound violated first in the horizon<br/>comfort bounds stay HARD, not relaxed<br/>then optimize again"]
+        FAIL["retry #gt; 40, checked after the solve, so 41 retries →<br/>write debug_mpc/debug_{config_file}_{y}_{m}_{d}.lp<br/>return, previous control points kept"]
+        EXTRACT["Take step t = 0 of the plan only:<br/>battery power_sp = batt_pos + batt_neg<br/>charger power_sp = −charger_power<br/>water heater power_sp = −waterheater_power<br/>EnergyPlus gets TEMPERATURE setpoints, not kW:<br/>heating #gt; 0 → heating_sp = planned indoor_temp_0, cooling_sp 40<br/>cooling #gt; 0 → heating_sp 5, cooling_sp = planned indoor_temp_0<br/>else → heating_sp 5, cooling_sp 40<br/>NOT 'off': clamped into the comfort band in 3f"]
         OPT --> STAT
         STAT -- "OPTIMAL, or TIME_LIMIT / MEM_LIMIT<br/>(logs warning, uses incumbent)" --> EXTRACT
         STAT -- "infeasible / other" --> RETRY --> OPT
-        RETRY -. after 40 retries .-> FAIL
+        RETRY -. after 41 retries .-> FAIL
     end
 
     %% ---------- 3f. Apply ----------
@@ -181,12 +180,12 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
         direction TB
         A_BATT["Battery: bound(power_sp) to power limits → exchange with grid"]
         A_EV{"Charger: do_forced_charging?"}
-        A_EVF["get_powers_to_reach_soc_final<br/>if the car can no longer reach soc_f by departure → forced charging<br/>forced_charged_power logged for the KPI"]
+        A_EVF["get_powers_to_reach_soc_final → charger_low, charger_high<br/>MPC power_sp clamped into them: the power still needed to reach soc_f<br/>by departure is a FLOOR, applied = max(MPC, required minimum)<br/>forced_charged_power = required minimum, every step, even if the MPC already met it<br/>so the forced_charged_energy KPI is an upper bound on the actual override<br/>forced_charged_power logged for the KPI"]
         A_EVN["limits = charger power_limit_low/high"]
         A_EVX["bound(power_sp) → grid sends abs(power) to charger"]
-        A_EP["EnergyPlus: clamp setpoints into current comfort range<br/>heating_sp ∈ comfort, cooling_sp ∈ comfort<br/>set_setpoints → EnergyPlus thermostat decides heat pump power"]
-        A_WH["Water heater override: t_tank ≥ high_setpoint → 0<br/>t_tank #lt; low_setpoint → full power, else MPC power_sp"]
-        A_RAT["RationalManager.simulate_step (simugrid)<br/>serve Consumer load, chargers, EnergyPlus from PV, battery, grid<br/>PV surplus → battery, then injection to grid<br/>water heater below low setpoint also served"]
+        A_EP["EnergyPlus, custom_classes.py:285: clamp setpoints into current comfort range<br/>THE ENERGYPLUS STEP RUNS HERE: set_setpoints blocks in fetch_readings<br/>until EnergyPlus has simulated the 15 min (5 s timeout → RuntimeError)<br/>heating_sp ∈ [t_low, t_up], cooling_sp ∈ [t_low, t_up]<br/>so the MPC 'no heating' 5 °C becomes heating_sp = t_low:<br/>a thermostat safety net that always holds the bottom of the band<br/>set_setpoints → input_queue → EnergyPlus HVAC decides the heat pump kW<br/>real kW can differ from the MPC's planned kW (RC-model mismatch)"]
+        A_WH["Water heater override, custom_classes.py:308: t_tank ≥ high_setpoint → 0<br/>t_tank #lt; low_setpoint → full power, else MPC power_sp (kW)<br/>simugrid tank model, NOT EnergyPlus; the MPC uses the same calc_end_temp,<br/>so its only error is the hot-water flow forecast"]
+        A_RAT["RationalManager.simulate_step (simugrid)<br/>HouseManager.__init__ emptied its battery/charger/EnergyPlus/water-heater lists,<br/>so this only balances Consumer load and PV against the PublicGrid<br/>battery, charger, EnergyPlus, water heater already exchanged with the grid<br/>via exec_power_trans above"]
         A_EV -- yes --> A_EVF --> A_EVX
         A_EV -- no --> A_EVN --> A_EVX
         A_BATT --> A_RAT
@@ -196,9 +195,9 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
     end
 
     %% ---------- 3g. Reality and scoring ----------
-    subgraph S3G["3g · Reality, scoring, clock: Manager.simulate_step → microgrid.simulate_after_action"]
+    subgraph S3G["3g · Rest of the step, scoring, clock: Manager.simulate_step → microgrid.simulate_after_action"]
         direction TB
-        REAL["Physical simulation of these 15 min, TRUE data:<br/>EnergyPlus (own thread, lockstep): detailed building physics,<br/>true weather → real indoor temp + heat pump electricity<br/>simugrid assets: water heater tank, EV soc, PV, household load"]
+        REAL["Rest of the 15 min, TRUE data:<br/>EnergyPlus already simulated this step inside set_setpoints (3f),<br/>in its own thread, lockstep: waits on input_queue, simulates 15 min,<br/>posts readings to results_queue, never concurrent with the MPC<br/>simugrid assets advance here: water heater tank, EV soc, PV, household load"]
         GRIDP["PublicGrid_0 power = balance of all assets<br/>+ offtake, − injection in power_hist"]
         KPI["reward_simulate → DayAheadEngie.calculate_kpi, REAL day_ahead_price .value<br/>offtake: day_ahead −= E × (price + offtake_extra) × 1.06 if #gt; 0, else × 1<br/>trans_dis −= E × kwh_offtake_cost<br/>injection: day_ahead −= E × (price + injection_extra)<br/>capacity = previous months − monthly peak (≥ 2.5 kW) × capacity_tariff<br/>year_fixed −= share of year × year_cost<br/>opex = day_ahead + trans_dis + capacity + year_fixed, negative = cost<br/>discomfort += Kh outside comfort band, linear interpolation between steps<br/>forced_charged_energy += forced power × dt<br/>soc_quantile = 95th pct of soc shortfall at departure"]
         INCR["incr_time_and_environment<br/>power_hist, attributes_hist, env_hist appended<br/>clock += 15 min, env values sampled for new step"]
@@ -214,7 +213,7 @@ subgraph S3["3 · Step loop: while utc_datetime #lt; end_time → management_sys
     FDICT --> C_COMF
     FDICT --> C_WH
     C_GRID --> C_BATT --> C_EVSOC --> C_EVCURVE --> PRICE
-    O_MIN --> C_PEAK --> C_TEMP --> C_COMF --> C_WH --> OPT
+    O_SUM --> C_PEAK --> C_TEMP --> C_COMF --> C_WH --> O_MIN --> OPT
     EXTRACT --> A_BATT
     EXTRACT --> A_EV
     EXTRACT --> A_EP
@@ -236,7 +235,7 @@ subgraph S4["4 · Teardown and outputs"]
     direction TB
     CLOSE["bar.close<br/>management_system.model.close, frees Gurobi model<br/>stop_energyplus_thread for every EnergyPlus asset"]
     MG["return microgrid<br/>tot_reward.KPIs: opex, discomfort, forced_charged_energy, soc_quantile …<br/>power_hist: per-asset power per step<br/>attributes_hist: zn0_temp, comfort bounds, EV soc, t_tank<br/>management_system.forecaster.mae_evaluation_log, realistic EV MAE"]
-    LOGR["get_results.log_results<br/>append to results/belgium_usefull_500.csv:<br/>opex, discomfort Kh, consumption kWh,<br/>grid offtake kWh, grid injection kWh<br/>+ KPIs, SoC, MAE logs, FileLock for parallel writes"]
+    LOGR["get_results.log_results<br/>one row per (config_file, ems_name) in results/belgium_usefull_500.csv,<br/>replacing an existing row (FileLock for parallel writes):<br/>opex, discomfort Kh, consumption kWh, grid offtake kWh, grid injection kWh<br/>+ _soc.json (no_enforcement runs only), _mae.json (realistic only),<br/>_profiles/ folder: power, reward and attribute CSVs"]
     CO2["fleet_harness/co2.py compute_rung_co2<br/>offtake_t = max(PublicGrid_0, 0) × dt, Europe/Brussels<br/>× hourly average intensity from ENTSO-E mix, ffill<br/>→ co2_kg, avg_intensity_paid, injection gets no credit<br/>PLANNED Phase 3: marginal CO₂ from merit-order model"]
     CLOSE --> MG
     MG --> LOGR

@@ -68,6 +68,14 @@ def test_day_ahead_cost_rejects_uncovered_timestamps():
         real_price_day_ahead_cost(g, 0.25, late_price, 0.0, 0.0)
 
 
+def test_day_ahead_cost_rejects_price_that_ends_too_early():
+    # e.g. the 2022 price billed on a 2023 run: no longer silently repeats its last value
+    g = grid([1.0] * 8, start="2023-06-01")
+    old_price = pd.Series([0.1], index=pd.DatetimeIndex(["2022-12-31 23:00"]))
+    with pytest.raises(ValueError, match="cover"):
+        real_price_day_ahead_cost(g, 0.25, old_price, 0.0, 0.0)
+
+
 # ---------------------------------------------------------------------------
 # Slow: 3-day MPC runs of house 0
 # ---------------------------------------------------------------------------
@@ -243,6 +251,20 @@ def test_opex_billed_at_real_price(price_and_tariffs, flat, run_flat_signal):
     at_signal = real_price_day_ahead_cost(g, dt, flat, **extras)
     assert r["kpis"]["day_ahead"] == pytest.approx(at_real, abs=1e-6)
     assert abs(at_signal - at_real) > 1e-3  # the check can tell the two apart
+
+
+@pytest.mark.slow
+@needs_paper_data
+def test_saved_signal_is_what_the_mpc_used(price_and_tariffs, flat, run_flat_signal, run_julian):
+    """extract_results()["signal"]: flat control signal + real price, over the run's steps."""
+    price, _ = price_and_tariffs
+    sig = run_flat_signal["signal"]
+    assert sig.index.equals(run_flat_signal["power"].index)
+    assert np.allclose(sig["control_signal"], flat.iloc[0])
+    real = price.tz_localize("UTC").reindex(sig.index)
+    assert np.allclose(sig["day_ahead_price_eur_per_kwh"], real)
+    julian = run_julian["signal"]  # no injected signal: control = price
+    assert np.allclose(julian["control_signal"], julian["day_ahead_price_eur_per_kwh"])
 
 
 @pytest.mark.slow

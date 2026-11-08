@@ -27,6 +27,7 @@ from belgian_dwellings.simulation.custom_classes import DayAheadEngie
 from belgian_dwellings.simulation.mpc_ems import MPCRealistic, PerfectMPC
 from belgian_dwellings.utils.progress import simulation_bar
 
+from fleet_harness.co2 import ffill_onto
 from fleet_harness.runner import PAPER_ROOT, get_price_series
 
 CAL_DIR = Path(__file__).resolve().parent.parent / "results" / "calibration"
@@ -153,10 +154,10 @@ def real_price_day_ahead_cost(grid_kw, time_step_h, price, offtake_extra, inject
     """
     if price.index.tz is None:
         price = price.tz_localize("UTC")
-    p = price.reindex(grid_kw.index, method="ffill")
-    if p.isna().any():
-        raise ValueError("price does not cover every grid timestamp")
-    p = p.to_numpy()
+    # The price file is 15-min (hourly also works); 1 h past a sample is the most allowed,
+    # so a price for the wrong year or one sliced too short raises instead of repeating
+    # its last value.
+    p = ffill_onto(price, grid_kw.index, pd.Timedelta("1h"), "price").to_numpy()
     energy = grid_kw.to_numpy() * time_step_h
     offtake_price = p + offtake_extra
     offtake = energy * offtake_price * np.where(offtake_price > 0, 1.06, 1.0)
@@ -183,7 +184,16 @@ def get_calibration(house_num, mode, tot_houses=500, year=2023):
     else:
         cal = get_energyplus_calibration(house_config_path(house_num, cal_year, tot_houses))
         CAL_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(pickle.dumps(cal))
+        # temp file + os.replace: a job reading the cache never sees a half-written pickle
+        fd, partial = tempfile.mkstemp(dir=CAL_DIR, prefix=f".{path.name}.", suffix=".partial")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(pickle.dumps(cal))
+            os.replace(partial, path)
+        except BaseException:
+            if os.path.exists(partial):
+                os.remove(partial)
+            raise
     return copy.deepcopy(cal)
 
 
@@ -274,8 +284,8 @@ def run_one_house_mpc(
     window, as the baseline for the equivalence check.
     gurobi_threads overrides Julian's Threads = 4 per solve (None keeps his 4). Default 1,
     decided 3 Nov (experiments/thread_check.py): all solves optimal, opex within 0.003 %,
-    ~40 % more fleet throughput. The thread count changes how Gurobi breaks ties, so every
-    run that is compared (baselines included) must use the same value.
+    +21 % fleet throughput (8 workers x 1 vs x 4). The thread count changes how Gurobi
+    breaks ties, so every run that is compared (baselines included) must use the same value.
     The calibration year is the other year for realistic and the same year for perfect
     (see calibration_year).
     """
@@ -329,6 +339,37 @@ def run_one_house_mpc(
     return microgrid
 
 
+PRICE_COL = "day_ahead_price_eur_per_kwh"
+SIGNAL_COL = "control_signal"
+
+
+def _env_series(microgrid, key):
+    """An env value's full series (naive UTC index), like runner.get_price_series."""
+    value = microgrid.environments[0].env_values[key]
+    dts, vals = zip(*value.dt_and_values)
+    return pd.Series(list(vals), index=pd.DatetimeIndex(list(dts)))
+
+
+def signal_table(microgrid, start=None, end=None):
+    """The real price and the signal the MPC planned on, over [start, end).
+
+    Columns: day_ahead_price_eur_per_kwh (what the bill uses) and control_signal (what the
+    MPC optimised; equal to the price when no signal was injected or use_signal=False).
+    Index: tz-aware UTC, named datetime, like the fleet power table. The env values hold the
+    whole input file (2022-2023), so the default window is the simulated part: from the
+    microgrid start to its current time (the end of a finished run).
+    """
+    price = _env_series(microgrid, "day_ahead_price")
+    env_values = microgrid.environments[0].env_values
+    signal = _env_series(microgrid, "control_signal") if "control_signal" in env_values else price
+    table = pd.DataFrame({PRICE_COL: price, SIGNAL_COL: signal})
+    table.index = table.index.tz_localize("UTC")
+    table.index.name = "datetime"
+    start = pd.Timestamp(start if start is not None else microgrid.start_time).tz_convert("UTC")
+    end = pd.Timestamp(end if end is not None else microgrid.utc_datetime).tz_convert("UTC")
+    return table[(table.index >= start) & (table.index < end)]
+
+
 def extract_results(microgrid):
     """Pull plain, picklable results out of a finished run.
 
@@ -339,6 +380,7 @@ def extract_results(microgrid):
                  (PublicGrid_0: positive = offtake, negative = injection, as in co2.py)
       attributes the attribute_to_log series (indoor temp, comfort bounds, EV soc, tank temp)
       solves     one row per MPC solve: Gurobi status and runtime (see record_solves)
+      signal     real price and control signal over the simulated window (signal_table)
       time_step_h
     Timestamps are kept as recorded (tz-aware). power_hist stamps the start of each step,
     attributes_hist the end (datetime + time_step), so the two frames are offset by one step.
@@ -368,6 +410,7 @@ def extract_results(microgrid):
         "power": power,
         "attributes": attributes,
         "solves": solves,
+        "signal": signal_table(microgrid),
         "time_step_h": microgrid.time_step.total_seconds() / 3600,
     }
 

@@ -66,3 +66,19 @@ def test_zero_offtake_gives_nan_average_not_crash():
     result = compute_rung_co2(mg, mix)
     assert result["co2_kg"] == 0.0
     assert pd.isna(result["avg_intensity_paid_gCO2_per_kWh"])
+
+
+def test_co2_raises_when_mix_ends_before_offtake():
+    # reindex(ffill) alone would repeat the last hour onto every later step.
+    mix = hourly_mix("2023-01-01 01:00", [(500.0, 0.0)])
+    mg = fake_microgrid("2023-01-01 00:00", [4.0] * 16)  # 4 h of steps, mix covers 1 h
+    with pytest.raises(ValueError, match="outside the intensity"):
+        compute_rung_co2(mg, mix)
+
+
+def test_co2_accepts_the_utc_year_end_hour():
+    # ENTSO-E year ends 23:00 Brussels (22:00 UTC) + 1 h; the UTC run goes to 23:45 UTC.
+    mix = hourly_mix("2023-12-31 22:00", [(500.0, 0.0), (0.0, 500.0)])
+    mg = fake_microgrid("2023-12-31 21:00", [4.0] * 12)  # 21:00..23:45 UTC
+    result = compute_rung_co2(mg, mix)
+    assert result["co2_g"] == pytest.approx(4 * GAS)  # 21:xx UTC = 22:xx Brussels = gas
