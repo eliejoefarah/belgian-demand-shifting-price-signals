@@ -54,6 +54,13 @@ export TMPDIR="${LOCALSCRATCH:-${TMPDIR:-/tmp}}"
 
 # One Gurobi thread per house, and keep numpy/BLAS from spawning extra threads per worker.
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+# Cap the other per-process thread pools too. The first full run (job 1988317, 8 Nov) failed
+# every house with "thread creation failed (11)" / EAGAIN: each house process imports polars
+# (paper forecaster.py) and pyarrow, which start pools sized to the node's cores plus jemalloc
+# background threads, and 16 such processes hit the per-user thread limit.
+export POLARS_MAX_THREADS=1 RAYON_NUM_THREADS=1 NUMEXPR_MAX_THREADS=1 ARROW_IO_THREADS=1
+export _RJEM_MALLOC_CONF=background_thread:false   # polars' jemalloc: no background threads
+echo "thread limit (ulimit -u): $(ulimit -u)  cgroup pids.max: $(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo n/a)"
 
 echo "node $(hostname)  task ${SLURM_ARRAY_TASK_ID:-}  cpus ${SLURM_CPUS_PER_TASK}  TMPDIR $TMPDIR"
 python -u -m experiments.fleet_baseline --year "${YEAR:?set YEAR=2022 or 2023}" \
