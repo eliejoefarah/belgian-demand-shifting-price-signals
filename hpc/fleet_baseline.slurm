@@ -13,24 +13,26 @@
 # Smoke test first (1 week, 2 houses per stratum, one task on the debug partition):
 #   sbatch --array=0 --partition=debug --cpus-per-task=16 --time=01:00:00 \
 #       --export=ALL,YEAR=2023,EXTRA="--houses smoke --days 7 --name smoke_2023 --n-shards 1" hpc/fleet_baseline.slurm
-# (EXTRA's --n-shards 1 comes after the script's --n-shards 8; argparse keeps the last one.)
-# Resubmit only some failed tasks: --array=3,7 (the script always passes --n-shards 8, so
-# task k still takes houses k, k+8, ...; keep it equal to the size of --array=0-7).
+# (EXTRA's --n-shards 1 comes after the script's --n-shards 16; argparse keeps the last one.)
+# Resubmit only some failed tasks: --array=3,7 (the script always passes --n-shards 16, so
+# task k still takes houses k, k+16, ...; keep it equal to the size of --array=0-15).
 #
 # Resumable: resubmitting the same command only runs houses without a house_{n}.json, and
 # stops if a done house was saved with other settings (e.g. a smoke test in the same folder).
 #
-# Sizing: 8 tasks x 32 cores = 256 cores = the per-user limit. 500 houses / 8 = 63 houses per
-# task -> 2 rounds of 32. Laptop timings: ~30 min per house-year alone, ~65 min per worker
-# under load, so ~1-2.2 h per task; --time has a margin. Replace with the smoke-test timing.
+# Sizing: 16 tasks x 16 cores = 256 cores = the per-user limit. Half-node tasks, because the
+# batch nodes are usually partly busy (8 Nov: ~21 idle cores per mixed node), so 32-core
+# tasks would wait for a fully free node. 500 houses / 16 = 32 houses per task -> 2 rounds of
+# 16. Laptop timings: ~30 min per house-year alone, ~65 min per worker under load, so
+# ~1-2.2 h per task; --time has a margin. Replace with the smoke-test timing.
 # Memory: ~0.6 GB per worker measured, Gurobi SoftMemLimit allows 2 GB per solve:
-# 3 GB per core = 96 GB of the node's 132 GB.
+# 3 GB per core = 48 GB per task (nodes have 132 GB).
 
 #SBATCH --job-name=fleet_baseline
 #SBATCH --partition=batch
-#SBATCH --array=0-7
+#SBATCH --array=0-15
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
 #SBATCH --mem-per-cpu=3000M
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/fleet_%A_%a.out
@@ -53,4 +55,4 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 echo "node $(hostname)  task ${SLURM_ARRAY_TASK_ID:-}  cpus ${SLURM_CPUS_PER_TASK}  TMPDIR $TMPDIR"
 python -u -m experiments.fleet_baseline --year "${YEAR:?set YEAR=2022 or 2023}" \
-    --workers "${SLURM_CPUS_PER_TASK}" --n-shards 8 ${EXTRA:-}
+    --workers "${SLURM_CPUS_PER_TASK}" --n-shards 16 ${EXTRA:-}
