@@ -6,7 +6,8 @@ Run from the repo root (paths are relative):
     python scripts/download_entsoe_generation.py 2023
 
 Datasets: generation per type, load, imports/exports, generation and capacity per unit,
-unavailability of generation units (outages, 9 Nov 2026) and day-ahead prices (9 Nov 2026).
+unavailability of generation units (outages), day-ahead prices and installed capacity per
+production type (all added 9 Nov 2026).
 Each dataset goes to data/entsoe_be_{year}_{name}.csv. Existing files are skipped, never
 overwritten (ENTSO-E revises data, so a re-download can change earlier results); delete a
 file to re-download it. A dataset that fails is reported and the others still run.
@@ -99,6 +100,10 @@ QUERIES = {
         "BE", start=start, end=end),
     # day-ahead price, EUR/MWh (validation: model marginal cost vs price). Hourly in 2022-23.
     "day_ahead_prices": lambda: client.query_day_ahead_prices("BE", start=start, end=end),
+    # installed capacity per production type (14.1.A, one value per type and year), MW:
+    # the whole-fleet x-axis of the Martin et al. Fig. 1a figure (temp_phase3_log.md 5.55)
+    "installed_capacity_per_type": lambda: client.query_installed_generation_capacity(
+        "BE", start=start, end=end, psr_type=None),
 }
 
 Path("data").mkdir(parents=True, exist_ok=True)
