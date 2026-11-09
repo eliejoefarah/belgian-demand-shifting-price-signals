@@ -14,6 +14,7 @@ import json
 import os
 import pickle
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -267,6 +268,50 @@ def record_solves(microgrid, ems):
     ems.update_control_points = wrapped
 
 
+def _progress_logger(ems, house_num):
+    """Opt-in diagnostic: with MPC_PROGRESS_EVERY=N in the environment, print one flushed
+    line every N steps (simulated time, wall time, solves incl. comfort retries).
+
+    Off (returns None) when the variable is unset, so normal runs are unchanged. Counts
+    every `build_model` call on this ems instance: Julian's update_control_points calls it
+    once per solve, also for each infeasibility retry (up to 41 per step), which
+    record_solves cannot see (it keeps only the last solve of a step).
+    """
+    every = int(os.environ.get("MPC_PROGRESS_EVERY", "0") or 0)
+    if every <= 0:
+        return None
+
+    state = {"builds": 0, "max_retry": 0, "steps": 0, "t0": time.perf_counter()}
+    state["t_last"] = state["t0"]
+    original_build = ems.build_model
+
+    def counting_build(retry=0, *args, **kwargs):
+        state["builds"] += 1
+        state["max_retry"] = max(state["max_retry"], retry)
+        return original_build(retry, *args, **kwargs)
+
+    ems.build_model = counting_build
+
+    def report(microgrid):
+        state["steps"] += 1
+        if state["steps"] % every:
+            return
+        now = time.perf_counter()
+        solves = microgrid.solve_log[-every:]
+        n_tl = sum(1 for _, status, _ in solves if status == 9)
+        n_bad = sum(1 for _, status, _ in solves if status not in (2, 9, 17))
+        print(
+            f"[progress house {house_num}] sim {microgrid.utc_datetime:%Y-%m-%d %H:%M} UTC | "
+            f"step {state['steps']} | wall {(now - state['t0']) / 60:.1f} min "
+            f"(+{now - state['t_last']:.0f} s) | solves {state['builds']} for {every} steps, "
+            f"max retry {state['max_retry']}, time-limit {n_tl}, non-optimal {n_bad}",
+            flush=True,
+        )
+        state.update(builds=0, max_retry=0, t_last=now)
+
+    return report
+
+
 def run_one_house_mpc(
     house_num,
     mode="realistic",
@@ -325,11 +370,14 @@ def run_one_house_mpc(
     ]:
         microgrid.attribute_to_log(asset, attr)
 
+    progress = _progress_logger(ems, house_num)
     bar = simulation_bar(microgrid, end_time, f"MPC {mode} house {house_num}")
     try:
         while microgrid.utc_datetime < end_time:
             microgrid.management_system.simulate_step()
             bar.update(1)
+            if progress:
+                progress(microgrid)
     finally:
         bar.close()
         ems.model.close()
