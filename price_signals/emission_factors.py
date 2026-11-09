@@ -52,6 +52,22 @@ Sources
 [7] Attia, S. (2026). Belgian Electricity Grid GHG Emission Factors
     1950-2050. Tech. report v1.1, Univ. de Liege. ISBN 978-2-930909-30-1
     (Belgian precedent: "biomass and waste" 230 lifecycle).
+[8] Cho, Y., Ko, M.-S., Zhu, H. (2025). PGLib-CO2: A Power Grid Library for
+    Real-Time Computation and Optimization of Carbon Emissions (title of v4;
+    v1 "...for Computing and Optimizing Carbon Emissions"). arXiv:2506.14662
+    [eess.SY], v1 17 Jun 2025, v4 18 Mar 2026, CC BY 4.0, no journal yet.
+    https://arxiv.org/abs/2506.14662. Code: github.com/jacobcho0103/PGLib-CO2
+    (no licence file: cite the values, don't copy the code), lookup table in
+    Python/carbon_casefile.py. One factor per fuel class in tCO2/MWh_el (the
+    code calls it "GCI"), sourced from IPCC 1996 (Houghton et al.; SAR; Revised
+    1996 Guidelines) and [9]; no heat rates, no OCGT/CHP/biomass class, no
+    must-run or start-up emissions. Marginal metric: LMCE = e_G^T dP_G/dP_D
+    from a DC-OPF; on one uncongested node this is the factor of the marginal
+    unit, i.e. the merit-order MEF. Values in PGLIB_CO2_FACTORS below. Caveat:
+    the repo README uses keys "GAS"/"BIT", which the lookup does not have
+    (silently 0); the valid keys are the ones below. Checked 8 Nov 2026.
+[9] Durvasulu, V., Hansen, T.M. (2021). IET Smart Grid 4(4), 429-444 (source
+    cited by [8] for its factors).
 """
 
 # ---------------------------------------------------------------------------
@@ -115,6 +131,33 @@ LIFECYCLE_FACTORS = {
     "Geothermal":                      38.0,  # B09  [1] 38 [6.0-79].
     "Marine":                          17.0,  # B13  [1] ocean 17 [5.6-28].
     "Other renewable":                700.0,  # B15  [2c] -> unknown [2a].
+}
+
+# ---------------------------------------------------------------------------
+# PGLib-CO2 [8]: emission factor per generator FUEL CLASS (not ENTSO-E types),
+# gCO2/kWh_el (= its t/MWh x 1000), for the Phase 3 merit-order dispatch model
+# (marginal emission factor = factor of the marginal unit). Values copied from
+# Python/carbon_casefile.py, 8 Nov 2026. CO2 only; its CO2e (SAR GWPs CH4 21,
+# N2O 310) is at most 0.5 % higher.
+# Implied efficiency (our calculation, IPCC gas default 56.1 kgCO2/GJ_fuel):
+# CCGT ~56 %, NG ~39 % (generic / peaker-like gas). Belgian gas in the dispatch
+# should average ~383 g/kWh (BE ETS fit [2b]), between CCGT and NG.
+# Plan (PLAN.md Phase 3): CCGT units -> "CCGT", other gas (OCGT, old steam, CHP
+# not run as must-run) -> "NG"; oil uses the BE ETS-fitted 850.74 above, not
+# PEL; biomass/waste follow the CONTESTED convention (0 direct).
+# ---------------------------------------------------------------------------
+PGLIB_CO2_FACTORS = {
+    "ANT":     909.5,  # anthracite coal
+    "COW":     820.4,  # bituminous coal
+    "PEL":     700.1,  # oil (paper table: distillate; code comment: heavy oil)
+    "NG":      517.3,  # natural gas, generic (~39 % implied efficiency)
+    "CCGT":    362.1,  # natural-gas combined cycle (~56 % implied efficiency)
+    "ICE":     603.0,  # internal combustion engine
+    "Thermal": 687.4,  # general thermal (in the code, not in the paper)
+    "NUC":       0.0,  # nuclear
+    "RE":        0.0,  # renewables
+    "HYD":       0.0,  # hydro
+    "SYNC":      0.0,  # synchronous condenser
 }
 
 # Values that are a convention, not a measurement: report with a sensitivity.

@@ -6,6 +6,7 @@ from price_signals.carbon_intensity import compute_intensity, gas_share
 from price_signals.emission_factors import (
     DIRECT_FACTORS,
     LIFECYCLE_FACTORS,
+    PGLIB_CO2_FACTORS,
     check_coverage,
 )
 
@@ -78,3 +79,11 @@ def test_gas_share_rejects_missing_gas_column():
 def test_gas_share_rejects_zero_generation():
     with pytest.raises(ValueError, match="zero or negative total generation"):
         gas_share(_mix([[100.0, 300.0], [0.0, 0.0]]))
+
+
+def test_pglib_co2_gas_classes_bracket_the_belgian_ets_value():
+    # Values copied from PGLib-CO2 (arXiv:2506.14662), checked 8 Nov 2026.
+    assert PGLIB_CO2_FACTORS["CCGT"] == pytest.approx(362.1)
+    assert PGLIB_CO2_FACTORS["NG"] == pytest.approx(517.3)
+    # Belgian gas fleet average (EU-ETS fit, 382.65) must fall between the two classes.
+    assert PGLIB_CO2_FACTORS["CCGT"] < 382.65 < PGLIB_CO2_FACTORS["NG"]
