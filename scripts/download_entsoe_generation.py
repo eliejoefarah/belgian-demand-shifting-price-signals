@@ -1,4 +1,4 @@
-"""Download Belgian ENTSO-E data for one year into data/ (Phase 3 inputs).
+"""Download Belgian ENTSO-E data for one year into data/ (Phase 3 and 4 inputs).
 
 Run from the repo root (paths are relative):
 
@@ -6,8 +6,8 @@ Run from the repo root (paths are relative):
     python scripts/download_entsoe_generation.py 2023
 
 Datasets: generation per type, load, imports/exports, generation and capacity per unit,
-unavailability of generation units (outages), day-ahead prices and installed capacity per
-production type (all added 9 Nov 2026).
+unavailability of generation units (outages), day-ahead prices, installed capacity per
+production type (all added 9 Nov 2026) and the day-ahead load forecast (Phase 4, 9 Nov 2026).
 Each dataset goes to data/entsoe_be_{year}_{name}.csv. Existing files are skipped, never
 overwritten (ENTSO-E revises data, so a re-download can change earlier results); delete a
 file to re-download it. A dataset that fails is reported and the others still run.
@@ -104,6 +104,12 @@ QUERIES = {
     # the whole-fleet x-axis of the Martin et al. Fig. 1a figure (temp_phase3_log.md 5.55)
     "installed_capacity_per_type": lambda: client.query_installed_generation_capacity(
         "BE", start=start, end=end, psr_type=None),
+    # day-ahead total load forecast (6.1.B, documentType A65, processType A01 = day-ahead),
+    # MW. Phase 4 leakage check: due "no later than two hours before the gate closure of
+    # the day-ahead market" but updatable; compare with Elia's 6PM forecast (ods001) to see
+    # which version ENTSO-E keeps (temp_phase4_log.md 1, 6).
+    "load_forecast_dayahead": lambda: client.query_load_forecast(
+        "BE", start=start, end=end, process_type="A01"),
 }
 
 Path("data").mkdir(parents=True, exist_ok=True)

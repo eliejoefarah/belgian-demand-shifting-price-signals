@@ -24,6 +24,16 @@ Datasets (field lists checked 9 Nov 2026, temp_phase4_log.md 1):
 - load  = ods001 "Measured and forecasted total load on the Belgian grid (Historical
   data)", from 2015. totalload; dayaheadforecast = 6PM (NOT usable before 14:00);
   weekaheadforecast; mostrecentforecast.
+- net_position_dayahead = ods023 "Day-ahead implicit net position (Belgium's balance)",
+  from 2019, 15-min, one row per quarter-hour: implicitnetposition = "Net sum of day-ahead
+  nominations of the implicit capacity allocated for energy exchanges for Belgium" (the
+  day-ahead market-coupling result). Candidate import forecast; publication time vs the
+  14:00 cutoff TO CHECK (temp_phase4_log.md 6).
+- generation_schedule_dayahead = ods034 "Day-ahead schedule of power generation -
+  aggregated by fuel type", 2015 to 21/05/2024 (ends at Elia's ICAROS go-live), one row
+  per fuel and quarter-hour: dayaheadgenerationschedule by fuelcode, from ARP nominations
+  of CIPU units "submitted on Day -1". Candidate gas forecast; submission time vs 14:00
+  TO CHECK.
 """
 
 import sys
@@ -36,6 +46,8 @@ DATASETS = {
     "wind": ("ods031", None),
     "solar": ("ods032", 'region = "Belgium"'),
     "load": ("ods001", None),
+    "net_position_dayahead": ("ods023", None),
+    "generation_schedule_dayahead": ("ods034", None),
 }
 YEARS = [int(a) for a in sys.argv[1:]] or [2021, 2022, 2023]
 
